@@ -2,13 +2,14 @@ import os
 import time
 import requests
 import urllib3
+import re
 from flask import Flask, request, jsonify
 from wechatpy.enterprise.crypto import WeChatCrypto
 from wechatpy.enterprise.exceptions import InvalidCorpIdException
 from wechatpy.exceptions import InvalidSignatureException
 from wechatpy.enterprise import parse_message, create_reply
 
-# 禁用 requests 的不安全请求警告 (对应 curl 中的 --insecure)
+# 禁用 requests 的不安全请求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -22,11 +23,11 @@ AGENTID = os.getenv('AGENTID')
 TOUSER = os.getenv('TOUSER', '@all')
 QYAPI_URL = os.getenv('QYAPI_URL', 'https://qyapi.weixin.qq.com').rstrip('/')
 
-# 企业微信回调配置 (在自建应用设置中获取)
+# 企业微信回调配置
 WECHAT_TOKEN = os.getenv('WECHAT_TOKEN', '')
 WECHAT_AESKEY = os.getenv('WECHAT_AESKEY', '')
 
-# PVE 配置
+# PVE 连接配置
 PVE_URL = os.getenv('PVE_URL', 'https://192.168.5.100:8006').rstrip('/')
 PVE_USER = os.getenv('PVE_USER', 'root@pam')
 PVE_PASS = os.getenv('PVE_PASS', 'djm123456')
@@ -75,8 +76,7 @@ def get_pve_auth():
 
     url = f"{PVE_URL}/api2/extjs/access/ticket"
     
-    # 核心修复点：自动分离用户名和认证域
-    # 如果环境变量填了 root@pam，自动拆分为 username=root, realm=pam
+    # 自动分离用户名和认证域
     req_username = PVE_USER
     req_realm = 'pam'
     if '@' in PVE_USER:
@@ -96,16 +96,14 @@ def get_pve_auth():
     
     try:
         resp = requests.post(url, data=data, headers=headers, verify=False, timeout=10).json()
-        
         if resp.get('data'):
             pve_ticket_cache = resp['data']['ticket']
             pve_csrf_cache = resp['data']['CSRFPreventionToken']
-            pve_ticket_expires_at = time.time() + 3600  # 缓存 1 小时
+            pve_ticket_expires_at = time.time() + 3600
             return pve_ticket_cache, pve_csrf_cache
         else:
             print(f"PVE 登录被拒绝，返回内容: {resp}")
             return None, None
-            
     except Exception as e:
         print(f"PVE 网络连接异常: {e}")
         return None, None
@@ -113,7 +111,7 @@ def get_pve_auth():
 def query_pve_status():
     ticket, csrf = get_pve_auth()
     if not ticket:
-        return "⚠️ PVE 登录失败，请检查账号密码或网络连接。"
+        return "⚠️ PVE 登录失败，请检查账号密码或网络连通性。"
 
     url = f"{PVE_URL}/api2/json/nodes/{PVE_NODE}/status"
     headers = {'CSRFPreventionToken': csrf}
@@ -123,21 +121,59 @@ def query_pve_status():
         resp = requests.get(url, headers=headers, cookies=cookies, verify=False, timeout=10).json()
         data = resp.get('data', {})
         
-        cpu = data.get('cpu', 0) * 100
-        memory_used = data.get('memory', {}).get('used', 0) / (1024**3)
-        memory_total = data.get('memory', {}).get('total', 0) / (1024**3)
+        # 1. CPU & 内存基础数据
+        cpu_model = data.get('cpuinfo', {}).get('model', '未知型号')
+        cpu_cores = data.get('cpuinfo', {}).get('cpus', 0)
+        cpu_usage = data.get('cpu', 0) * 100
         
-        temp_info = data.get('temperature', '未获取到硬件温度数据(需PVE安装sensors)')
-        if 'cpuinfo' in data and 'hwpkg' in data['cpuinfo']:
-             temp_info = f"{data['cpuinfo']['hwpkg']} °C"
+        mem_used = data.get('memory', {}).get('used', 0) / (1024**3)
+        mem_total = data.get('memory', {}).get('total', 0) / (1024**3)
+        mem_percent = (mem_used / mem_total * 100) if mem_total > 0 else 0
+        
+        # 2. 解析 sensors_info (温度与风扇)
+        sensors = data.get('sensors_info', '')
+        
+        cpu_temp_match = re.search(r'Package id 0:\s+\+([\d\.]+)', sensors)
+        cpu_temp = cpu_temp_match.group(1) + '°C' if cpu_temp_match else '未知'
+        
+        board_temp_match = re.search(r'acpitz-acpi-0[\s\S]*?temp1:\s+\+([\d\.]+)', sensors)
+        board_temp = board_temp_match.group(1) + '°C' if board_temp_match else '未知'
+        
+        fans = re.findall(r'fan\d+:\s+(\d+)\s+RPM', sensors)
+        active_fans = [f for f in fans if int(f) > 0]
+        fan_speed = f"{active_fans[0]} RPM" if active_fans else "停转"
+        
+        # 3. 解析 ups_info (提取硬盘状态)
+        ups_info = data.get('ups_info', '')
+        disks = []
+        disk_blocks = re.findall(r'PVEASSIST_DISK_BEGIN(.*?)PVEASSIST_DISK_END', ups_info, re.DOTALL)
+        for block in disk_blocks:
+            model_match = re.search(r'Model Number:\s+(.+)', block)
+            temp_match = re.search(r'Temperature:\s+(\d+)', block)
+            used_match = re.search(r'Percentage Used:\s+(\d+)', block)
+            cap_match = re.search(r'Namespace 1 Size/Capacity:\s+\[(.*?)\]', block)
+            
+            if model_match:
+                model = model_match.group(1).strip()
+                temp = temp_match.group(1) + '°C' if temp_match else '未知'
+                cap = cap_match.group(1) if cap_match else '未知'
+                life = str(100 - int(used_match.group(1))) + '%' if used_match else '未知'
+                disks.append(f"💽 {model}\n  容量: {cap} | 温度: {temp} | 寿命: {life}")
+        
+        disk_str = "\n".join(disks) if disks else " 未获取到硬盘数据"
 
+        # 4. 组装最终排版结果
         result = (
             f"🖥️ 节点 [{PVE_NODE}] 概况\n"
             f"----------------------\n"
-            f"🌡️ 温度/状态: {temp_info}\n"
-            f"📊 CPU: {cpu:.1f}%\n"
-            f"🧠 内存: {memory_used:.1f}GB / {memory_total:.1f}GB\n"
-            f"⏱️ 运行时间: {data.get('uptime', 0) // 3600} 小时"
+            f"⚙️ CPU: {cpu_cores}核 {cpu_model}\n"
+            f"📊 负载: CPU {cpu_usage:.1f}% | 内存 {mem_percent:.1f}%\n"
+            f"🧠 内存: {mem_used:.1f}GB / {mem_total:.1f}GB\n"
+            f"----------------------\n"
+            f"🌡️ 温度: CPU {cpu_temp} | 主板 {board_temp}\n"
+            f"🌀 风扇: {fan_speed}\n"
+            f"----------------------\n"
+            f"{disk_str}"
         )
         return result
     except Exception as e:
@@ -156,19 +192,54 @@ def query_pve_vms():
         resp = requests.get(url, headers=headers, cookies=cookies, verify=False, timeout=10).json()
         resources = resp.get('data', [])
         
+        # 筛选出虚拟机和LXC容器
         vms = [res for res in resources if res.get('type') in ['qemu', 'lxc']]
         if not vms:
             return "未查询到虚拟机数据。"
         
-        result_lines = ["📦 虚拟机/LXC 状态\n----------------------"]
+        result_lines = ["📦 虚拟机/LXC 运行状态\n----------------------"]
+        
+        # 按 VMID 排序
         for vm in sorted(vms, key=lambda x: x.get('vmid', 0)):
             vmid = vm.get('vmid')
             name = vm.get('name', 'Unknown')
             status = vm.get('status', 'unknown')
-            icon = "🟢" if status == "running" else "🔴"
-            result_lines.append(f"{icon} {vmid} - {name} ({status})")
+            tags = vm.get('tags', '')
             
-        return "\n".join(result_lines)
+            # 资源数据计算
+            maxcpu = vm.get('maxcpu', 0)
+            cpu_usage = vm.get('cpu', 0) * 100
+            
+            mem_used = vm.get('mem', 0) / (1024**3)
+            maxmem = vm.get('maxmem', 0) / (1024**3)
+            mem_percent = (mem_used / maxmem * 100) if maxmem > 0 else 0
+            
+            uptime = vm.get('uptime', 0)
+            uptime_hrs = uptime // 3600
+            uptime_mins = (uptime % 3600) // 60
+            
+            # 状态处理与排版
+            if status == 'running':
+                icon = "🟢"
+                status_text = f"运行中 ({uptime_hrs}h{uptime_mins}m)"
+            elif status == 'stopped':
+                icon = "🔴"
+                status_text = "已关机"
+                # 关机状态下置零显示
+                cpu_usage, mem_percent = 0, 0
+            else:
+                icon = "🟡"
+                status_text = status
+
+            # 组装单台虚拟机的信息
+            result_lines.append(f"{icon} [{vmid}] {name}")
+            if tags:
+                result_lines.append(f"  ├─ IP/标签: {tags}")
+            result_lines.append(f"  ├─ 状态: {status_text}")
+            result_lines.append(f"  ├─ 规格: {maxcpu}核 | {maxmem:.1f}GB")
+            result_lines.append(f"  └─ 负载: CPU {cpu_usage:.1f}% | 内存 {mem_percent:.1f}%\n")
+            
+        return "\n".join(result_lines).strip()
     except Exception as e:
         return f"查询虚拟机异常: {str(e)}"
 
@@ -239,5 +310,5 @@ def health():
     return "OK", 200
 
 if __name__ == '__main__':
-    # 端口已修改为 1500，配合 host 网络模式使用
+    # 使用 1500 端口
     app.run(host='0.0.0.0', port=1500)
