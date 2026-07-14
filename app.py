@@ -143,24 +143,29 @@ def query_pve_status():
         active_fans = [f for f in fans if int(f) > 0]
         fan_speed = f"{active_fans[0]} RPM" if active_fans else "停转"
         
-        # 3. 解析 ups_info (提取硬盘状态)
-        ups_info = data.get('ups_info', '')
+        # 3. 解析硬盘状态 (智能搜索所有动态键名)
+        disk_raw_data = ""
+        for key, value in data.items():
+            if isinstance(value, str) and 'PVEASSIST_DISK_BEGIN' in value:
+                disk_raw_data += value + "\n"
+                
         disks = []
-        disk_blocks = re.findall(r'PVEASSIST_DISK_BEGIN(.*?)PVEASSIST_DISK_END', ups_info, re.DOTALL)
+        disk_blocks = re.findall(r'PVEASSIST_DISK_BEGIN(.*?)PVEASSIST_DISK_END', disk_raw_data, re.DOTALL)
         for block in disk_blocks:
-            model_match = re.search(r'Model Number:\s+(.+)', block)
+            # 兼容 NVMe 和 SATA 硬盘的字段
+            model_match = re.search(r'(?:Model Number|Device Model):\s+(.+)', block)
             temp_match = re.search(r'Temperature:\s+(\d+)', block)
             used_match = re.search(r'Percentage Used:\s+(\d+)', block)
-            cap_match = re.search(r'Namespace 1 Size/Capacity:\s+\[(.*?)\]', block)
+            cap_match = re.search(r'Capacity:\s+\[(.*?)\]', block)
             
             if model_match:
                 model = model_match.group(1).strip()
                 temp = temp_match.group(1) + '°C' if temp_match else '未知'
                 cap = cap_match.group(1) if cap_match else '未知'
                 life = str(100 - int(used_match.group(1))) + '%' if used_match else '未知'
-                disks.append(f"💽 {model}\n  容量: {cap} | 温度: {temp} | 寿命: {life}")
+                disks.append(f"💽 {model}\n  ├─ 容量: {cap}\n  └─ 温度: {temp} | 寿命: {life}")
         
-        disk_str = "\n".join(disks) if disks else " 未获取到硬盘数据"
+        disk_str = "\n".join(disks) if disks else "未获取到硬盘数据"
 
         # 4. 组装最终排版结果
         result = (
@@ -310,5 +315,5 @@ def health():
     return "OK", 200
 
 if __name__ == '__main__':
-    # 使用 1500 端口
+    # 使用 1500 端口配合 host 网络模式，避免与群晖 5000 端口冲突
     app.run(host='0.0.0.0', port=1500)
