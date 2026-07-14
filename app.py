@@ -17,18 +17,13 @@ app = Flask(__name__)
 
 # ==================== 环境变量配置 ====================
 
-# 企业微信基础配置
 CORPID = os.getenv('CORPID')
 CORPSECRET = os.getenv('CORPSECRET')
 AGENTID = os.getenv('AGENTID')
 TOUSER = os.getenv('TOUSER', '@all')
 QYAPI_URL = os.getenv('QYAPI_URL', 'https://qyapi.weixin.qq.com').rstrip('/')
-
-# 企业微信回调配置
 WECHAT_TOKEN = os.getenv('WECHAT_TOKEN', '')
 WECHAT_AESKEY = os.getenv('WECHAT_AESKEY', '')
-
-# PVE 连接配置
 PVE_URL = os.getenv('PVE_URL', 'https://192.168.5.100:8006').rstrip('/')
 PVE_USER = os.getenv('PVE_USER', 'root@pam')
 PVE_PASS = os.getenv('PVE_PASS', 'djm123456')
@@ -37,7 +32,6 @@ PVE_NODE = os.getenv('PVE_NODE', 'jiumian')
 # ==================== 全局缓存 ====================
 access_token = None
 token_expires_at = 0
-
 pve_ticket_cache = None
 pve_csrf_cache = None
 pve_ticket_expires_at = 0
@@ -77,7 +71,6 @@ def get_pve_auth():
 
     url = f"{PVE_URL}/api2/extjs/access/ticket"
     
-    # 自动分离用户名和认证域
     req_username = PVE_USER
     req_realm = 'pam'
     if '@' in PVE_USER:
@@ -89,12 +82,10 @@ def get_pve_auth():
         'realm': req_realm,
         'new-format': '1'
     }
-    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'X-Requested-With': 'XMLHttpRequest'
     }
-    
     try:
         resp = requests.post(url, data=data, headers=headers, verify=False, timeout=10).json()
         if resp.get('data'):
@@ -102,11 +93,8 @@ def get_pve_auth():
             pve_csrf_cache = resp['data']['CSRFPreventionToken']
             pve_ticket_expires_at = time.time() + 3600
             return pve_ticket_cache, pve_csrf_cache
-        else:
-            print(f"PVE 登录被拒绝，返回内容: {resp}")
-            return None, None
-    except Exception as e:
-        print(f"PVE 网络连接异常: {e}")
+        return None, None
+    except Exception:
         return None, None
 
 def query_pve_status():
@@ -122,7 +110,6 @@ def query_pve_status():
         resp = requests.get(url, headers=headers, cookies=cookies, verify=False, timeout=10).json()
         data = resp.get('data', {})
         
-        # 1. CPU & 内存基础数据
         cpu_model = data.get('cpuinfo', {}).get('model', '未知型号')
         cpu_cores = data.get('cpuinfo', {}).get('cpus', 0)
         cpu_usage = data.get('cpu', 0) * 100
@@ -131,9 +118,7 @@ def query_pve_status():
         mem_total = data.get('memory', {}).get('total', 0) / (1024**3)
         mem_percent = (mem_used / mem_total * 100) if mem_total > 0 else 0
         
-        # 2. 解析 sensors_info (温度与风扇)
         sensors = data.get('sensors_info', '')
-        
         cpu_temp_match = re.search(r'Package id 0:\s+\+([\d\.]+)', sensors)
         cpu_temp = cpu_temp_match.group(1) + '°C' if cpu_temp_match else '未知'
         
@@ -144,7 +129,6 @@ def query_pve_status():
         active_fans = [f for f in fans if int(f) > 0]
         fan_speed = f"{active_fans[0]} RPM" if active_fans else "停转"
         
-        # 3. 解析硬盘状态 (智能搜索所有动态键名)
         disk_raw_data = ""
         for key, value in data.items():
             if isinstance(value, str) and 'PVEASSIST_DISK_BEGIN' in value:
@@ -153,7 +137,6 @@ def query_pve_status():
         disks = []
         disk_blocks = re.findall(r'PVEASSIST_DISK_BEGIN(.*?)PVEASSIST_DISK_END', disk_raw_data, re.DOTALL)
         for block in disk_blocks:
-            # 兼容 NVMe 和 SATA 硬盘的字段
             model_match = re.search(r'(?:Model Number|Device Model):\s+(.+)', block)
             temp_match = re.search(r'Temperature:\s+(\d+)', block)
             used_match = re.search(r'Percentage Used:\s+(\d+)', block)
@@ -168,7 +151,6 @@ def query_pve_status():
         
         disk_str = "\n".join(disks) if disks else "未获取到硬盘数据"
 
-        # 4. 组装最终排版结果
         result = (
             f"🖥️ 节点 [{PVE_NODE}] 概况\n"
             f"----------------------\n"
@@ -198,24 +180,20 @@ def query_pve_vms():
         resp = requests.get(url, headers=headers, cookies=cookies, verify=False, timeout=10).json()
         resources = resp.get('data', [])
         
-        # 筛选出虚拟机和LXC容器
         vms = [res for res in resources if res.get('type') in ['qemu', 'lxc']]
         if not vms:
             return "未查询到虚拟机数据。"
         
         result_lines = ["📦 虚拟机/LXC 运行状态\n----------------------"]
         
-        # 按 VMID 排序
         for vm in sorted(vms, key=lambda x: x.get('vmid', 0)):
             vmid = vm.get('vmid')
             name = vm.get('name', 'Unknown')
             status = vm.get('status', 'unknown')
             tags = vm.get('tags', '')
             
-            # 资源数据计算
             maxcpu = vm.get('maxcpu', 0)
             cpu_usage = vm.get('cpu', 0) * 100
-            
             mem_used = vm.get('mem', 0) / (1024**3)
             maxmem = vm.get('maxmem', 0) / (1024**3)
             mem_percent = (mem_used / maxmem * 100) if maxmem > 0 else 0
@@ -224,20 +202,17 @@ def query_pve_vms():
             uptime_hrs = uptime // 3600
             uptime_mins = (uptime % 3600) // 60
             
-            # 状态处理与排版
             if status == 'running':
                 icon = "🟢"
                 status_text = f"运行中 ({uptime_hrs}h{uptime_mins}m)"
             elif status == 'stopped':
                 icon = "🔴"
                 status_text = "已关机"
-                # 关机状态下置零显示
                 cpu_usage, mem_percent = 0, 0
             else:
                 icon = "🟡"
                 status_text = status
 
-            # 组装单台虚拟机的信息
             result_lines.append(f"{icon} [{vmid}] {name}")
             if tags:
                 result_lines.append(f"  ├─ IP/标签: {tags}")
@@ -264,21 +239,41 @@ def webhook():
         return jsonify({"errcode": 400, "errmsg": "未找到消息内容"}), 400
 
     try:
-        # 自动生成时间和精美排版
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
+        app_name = "系统通知"
+        icon = "🔔"
+        
+        if any(kw in content for kw in ["构建项目", "容器", "Docker", "Container Manager"]):
+            app_name = "Container Manager (Docker)"
+            icon = "🐳"
+        elif any(kw in content for kw in ["硬盘", "存储池", "SSD", "降级", "损毁", "SMART"]):
+            app_name = "存储管理器"
+            icon = "💾"
+        elif any(kw in content for kw in ["备份", "Hyper Backup", "Active Backup"]):
+            app_name = "备份服务"
+            icon = "🔄"
+        elif any(kw in content for kw in ["登录", "IP地址", "密码", "封锁"]):
+            app_name = "安全中心"
+            icon = "🛡️"
+        elif any(kw in content for kw in ["UPS", "电源", "断电", "关机", "重启"]):
+            app_name = "电源与硬件"
+            icon = "⚡"
+        elif any(kw in content for kw in ["更新", "升级", "DSM"]):
+            app_name = "系统更新"
+            icon = "🔄"
+
         formatted_content = (
-            f"🔔 【群晖系统通知】\n"
+            f"{icon} 【群晖 {app_name}】\n"
             f"⏱️ 时间: {current_time}\n"
             f"----------------------\n"
-            f"📋 内容: {content}"
+            f"📋 {content}"
         )
         
         res = send_wechat_msg(formatted_content)
         return jsonify(res)
     except Exception as e:
         return jsonify({"errcode": 500, "errmsg": str(e)}), 500
-
 
 @app.route('/wechat', methods=['GET', 'POST'])
 def wechat_callback():
@@ -319,8 +314,7 @@ def wechat_callback():
                 return crypto.encrypt_message(reply.render(), nonce, timestamp)
             return "success"
             
-        except Exception as e:
-            print(f"WeChat Callback Error: {e}")
+        except Exception:
             return "success"
 
 @app.route('/health', methods=['GET'])
@@ -328,5 +322,4 @@ def health():
     return "OK", 200
 
 if __name__ == '__main__':
-    # 使用 1500 端口配合 host 网络模式，避免与群晖 5000 端口冲突
     app.run(host='0.0.0.0', port=1500)
