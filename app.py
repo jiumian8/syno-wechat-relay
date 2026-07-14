@@ -70,21 +70,25 @@ def send_wechat_msg(content):
 
 def get_pve_auth():
     global pve_ticket_cache, pve_csrf_cache, pve_ticket_expires_at
-    # 简单缓存 PVE Ticket (有效期通常约 2 小时)
     if time.time() < pve_ticket_expires_at and pve_ticket_cache:
         return pve_ticket_cache, pve_csrf_cache
 
     url = f"{PVE_URL}/api2/extjs/access/ticket"
     
-    # 补全表单参数，增加 new-format=1
+    # 核心修复点：自动分离用户名和认证域
+    # 如果环境变量填了 root@pam，自动拆分为 username=root, realm=pam
+    req_username = PVE_USER
+    req_realm = 'pam'
+    if '@' in PVE_USER:
+        req_username, req_realm = PVE_USER.split('@', 1)
+        
     data = {
-        'username': PVE_USER, 
+        'username': req_username, 
         'password': PVE_PASS, 
-        'realm': 'pam',
+        'realm': req_realm,
         'new-format': '1'
     }
     
-    # 补全请求头，伪装成浏览器 AJAX 请求以通过 PVE 的安全校验
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'X-Requested-With': 'XMLHttpRequest'
@@ -119,12 +123,10 @@ def query_pve_status():
         resp = requests.get(url, headers=headers, cookies=cookies, verify=False, timeout=10).json()
         data = resp.get('data', {})
         
-        # 提取关键信息，温度信息依赖 PVE 是否配置了 sensors
         cpu = data.get('cpu', 0) * 100
         memory_used = data.get('memory', {}).get('used', 0) / (1024**3)
         memory_total = data.get('memory', {}).get('total', 0) / (1024**3)
         
-        # 尝试获取温度 (若 PVE 扩展了温度显示，通常在 cpuinfo 或 sensors 字段中)
         temp_info = data.get('temperature', '未获取到硬件温度数据(需PVE安装sensors)')
         if 'cpuinfo' in data and 'hwpkg' in data['cpuinfo']:
              temp_info = f"{data['cpuinfo']['hwpkg']} °C"
@@ -172,7 +174,6 @@ def query_pve_vms():
 
 # ==================== Web 路由控制 ====================
 
-# 1. 接收群晖通知的主动群发接口
 @app.route('/webhook', methods=['POST'])
 def webhook():
     content = ""
@@ -190,7 +191,6 @@ def webhook():
     except Exception as e:
         return jsonify({"errcode": 500, "errmsg": str(e)}), 500
 
-# 2. 核心：企业微信回调与交互接口
 @app.route('/wechat', methods=['GET', 'POST'])
 def wechat_callback():
     signature = request.args.get("msg_signature", "")
@@ -202,7 +202,6 @@ def wechat_callback():
         
     crypto = WeChatCrypto(WECHAT_TOKEN, WECHAT_AESKEY, CORPID)
 
-    # 企业微信配置 URL 时的 GET 验证请求
     if request.method == 'GET':
         echostr = request.args.get("echostr", "")
         try:
@@ -211,15 +210,12 @@ def wechat_callback():
         except InvalidSignatureException:
             return "Invalid signature", 403
 
-    # 用户在企业微信发消息/点菜单的 POST 请求
     elif request.method == 'POST':
         try:
-            # 解密消息
             decrypted_xml = crypto.decrypt_message(request.data, signature, timestamp, nonce)
             msg = parse_message(decrypted_xml)
             reply_content = ""
             
-            # 处理文字输入
             if msg.type == 'text':
                 content = msg.content.strip()
                 if content == "温度":
@@ -229,14 +225,12 @@ def wechat_callback():
                 else:
                     reply_content = "💡 回复关键字获取信息：\n- 输入【温度】查询 PVE 概况\n- 输入【虚拟机】查询状态列表"
             
-            # 返回加密的 XML 结果给企业微信
             if reply_content:
                 reply = create_reply(reply_content, msg)
                 return crypto.encrypt_message(reply.render(), nonce, timestamp)
             return "success"
             
         except Exception as e:
-            # 无论发生什么报错，都要返回 success 给企业微信，避免其无限重试报错
             print(f"WeChat Callback Error: {e}")
             return "success"
 
@@ -245,4 +239,5 @@ def health():
     return "OK", 200
 
 if __name__ == '__main__':
+    # 端口已修改为 1500，配合 host 网络模式使用
     app.run(host='0.0.0.0', port=1500)
