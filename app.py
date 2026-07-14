@@ -1,5 +1,6 @@
 import os
 import time
+import datetime
 import requests
 import urllib3
 import re
@@ -261,11 +262,23 @@ def webhook():
 
     if not content:
         return jsonify({"errcode": 400, "errmsg": "未找到消息内容"}), 400
+
     try:
-        res = send_wechat_msg(content)
+        # 自动生成时间和精美排版
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        formatted_content = (
+            f"🔔 【群晖系统通知】\n"
+            f"⏱️ 时间: {current_time}\n"
+            f"----------------------\n"
+            f"📋 内容: {content}"
+        )
+        
+        res = send_wechat_msg(formatted_content)
         return jsonify(res)
     except Exception as e:
         return jsonify({"errcode": 500, "errmsg": str(e)}), 500
+
 
 @app.route('/wechat', methods=['GET', 'POST'])
 def wechat_callback():
