@@ -13,6 +13,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
+# ==================== 环境变量配置 ====================
+
 # 企业微信基础配置
 CORPID = os.getenv('CORPID')
 CORPSECRET = os.getenv('CORPSECRET')
@@ -30,9 +32,10 @@ PVE_USER = os.getenv('PVE_USER', 'root@pam')
 PVE_PASS = os.getenv('PVE_PASS', 'djm123456')
 PVE_NODE = os.getenv('PVE_NODE', 'jiumian')
 
-# 全局缓存
+# ==================== 全局缓存 ====================
 access_token = None
 token_expires_at = 0
+
 pve_ticket_cache = None
 pve_csrf_cache = None
 pve_ticket_expires_at = 0
@@ -72,15 +75,35 @@ def get_pve_auth():
         return pve_ticket_cache, pve_csrf_cache
 
     url = f"{PVE_URL}/api2/extjs/access/ticket"
-    data = {'username': PVE_USER, 'password': PVE_PASS, 'realm': 'pam'}
-    resp = requests.post(url, data=data, verify=False).json()
     
-    if resp.get('data'):
-        pve_ticket_cache = resp['data']['ticket']
-        pve_csrf_cache = resp['data']['CSRFPreventionToken']
-        pve_ticket_expires_at = time.time() + 3600  # 缓存 1 小时
-        return pve_ticket_cache, pve_csrf_cache
-    else:
+    # 补全表单参数，增加 new-format=1
+    data = {
+        'username': PVE_USER, 
+        'password': PVE_PASS, 
+        'realm': 'pam',
+        'new-format': '1'
+    }
+    
+    # 补全请求头，伪装成浏览器 AJAX 请求以通过 PVE 的安全校验
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+    
+    try:
+        resp = requests.post(url, data=data, headers=headers, verify=False, timeout=10).json()
+        
+        if resp.get('data'):
+            pve_ticket_cache = resp['data']['ticket']
+            pve_csrf_cache = resp['data']['CSRFPreventionToken']
+            pve_ticket_expires_at = time.time() + 3600  # 缓存 1 小时
+            return pve_ticket_cache, pve_csrf_cache
+        else:
+            print(f"PVE 登录被拒绝，返回内容: {resp}")
+            return None, None
+            
+    except Exception as e:
+        print(f"PVE 网络连接异常: {e}")
         return None, None
 
 def query_pve_status():
@@ -93,7 +116,7 @@ def query_pve_status():
     cookies = {'PVEAuthCookie': ticket}
     
     try:
-        resp = requests.get(url, headers=headers, cookies=cookies, verify=False).json()
+        resp = requests.get(url, headers=headers, cookies=cookies, verify=False, timeout=10).json()
         data = resp.get('data', {})
         
         # 提取关键信息，温度信息依赖 PVE 是否配置了 sensors
@@ -101,7 +124,7 @@ def query_pve_status():
         memory_used = data.get('memory', {}).get('used', 0) / (1024**3)
         memory_total = data.get('memory', {}).get('total', 0) / (1024**3)
         
-        # 尝试获取温度 (若你的 PVE 扩展了温度显示，通常在 cpuinfo 或 sensors 字段中)
+        # 尝试获取温度 (若 PVE 扩展了温度显示，通常在 cpuinfo 或 sensors 字段中)
         temp_info = data.get('temperature', '未获取到硬件温度数据(需PVE安装sensors)')
         if 'cpuinfo' in data and 'hwpkg' in data['cpuinfo']:
              temp_info = f"{data['cpuinfo']['hwpkg']} °C"
@@ -128,7 +151,7 @@ def query_pve_vms():
     cookies = {'PVEAuthCookie': ticket}
     
     try:
-        resp = requests.get(url, headers=headers, cookies=cookies, verify=False).json()
+        resp = requests.get(url, headers=headers, cookies=cookies, verify=False, timeout=10).json()
         resources = resp.get('data', [])
         
         vms = [res for res in resources if res.get('type') in ['qemu', 'lxc']]
@@ -147,7 +170,7 @@ def query_pve_vms():
     except Exception as e:
         return f"查询虚拟机异常: {str(e)}"
 
-# ==================== 路由控制 ====================
+# ==================== Web 路由控制 ====================
 
 # 1. 接收群晖通知的主动群发接口
 @app.route('/webhook', methods=['POST'])
@@ -196,7 +219,7 @@ def wechat_callback():
             msg = parse_message(decrypted_xml)
             reply_content = ""
             
-            # 处理文字输入 (比如你在聊天框发送"温度"或"虚拟机")
+            # 处理文字输入
             if msg.type == 'text':
                 content = msg.content.strip()
                 if content == "温度":
