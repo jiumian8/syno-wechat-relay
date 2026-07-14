@@ -29,4 +29,4 @@ jobs:
           context: .
           push: true
           # 替换为你自己的 Docker Hub 用户名
-          tags: jiumian8/syno-wechat-relay:latest
+          tags: jiumianex/syno-wechat-relay:latest
